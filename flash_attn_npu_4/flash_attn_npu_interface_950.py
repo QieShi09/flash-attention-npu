@@ -212,8 +212,9 @@ def flash_attn_varlen_func(
         softmax_scale = q.shape[-1] ** (-0.5)
 
     if seqused_k is not None and isinstance(seqused_k, int):
+        batch_size = cu_seqlens_q.shape[0] - 1 if cu_seqlens_q is not None else q.shape[0]
         seqused_k = torch.full(
-            (q.shape[0],), seqused_k, dtype=torch.int32, device=k.device
+            (batch_size,), seqused_k, dtype=torch.int32, device=k.device
         )
         seqused_k = _maybe_contiguous(seqused_k)
 
