@@ -423,84 +423,83 @@ namespace SplitFuse {
                                 softmaxPingPongFlag
                             );
                             taskStateSequence += static_cast<uint32_t>(hasTaskWork);
-
-                            if (isSplitKV) {
-                                uint32_t qSBlockSizeTmp = (s1Idx == static_cast<int32_t>(curQSBlockNumTmp - 1U)) ?
-                                    (qSeqlenCur - s1Idx * curQSBlockTileTmp) : curQSBlockTileTmp;
-                                uint32_t qNBlockIdxCurGroupTmp = n1Idx % qNBlockNumPerGroupTmp;
-                                uint32_t qNBlockSizeTmp = (qNBlockIdxCurGroupTmp == (qNBlockNumPerGroupTmp - 1U)) ?
-                                    (groupSize - qNBlockIdxCurGroupTmp * curQNBlockTileTmp) : curQNBlockTileTmp;
-                                gmOffsetLseFD += qSBlockSizeTmp * qNBlockSizeTmp;
-                                gmOffsetOFD += qSBlockSizeTmp * qNBlockSizeTmp * embedV;
-                            }
-                        }
                     }
                 }
+            }
             } else if (flashDecodeFlag == 0U) {
-                // Reuse the batch cursor across monotonically increasing tasks.
-                uint32_t curBatchTmp = 0;
-                uint32_t preTotalTaskNumTmp = 0;
-                uint32_t curTotalTaskNumTmp = firstBatchTaskNum;
-                uint32_t cachedBatch = 0xFFFFFFFFU;
-                uint32_t curQNBlockNumCur = 0;
-                uint32_t curQSBlockNumCur = 0;
-                uint32_t qSeqlenCur = 0;
-                uint32_t kvSeqlenCur = 0;
-                // Resolve batch 0 Q length here since the firstBatchTaskNum seed skips the while advance for batch 0
-                qSeqlenCur = fATilingData->maxQSeqlen;
-                if constexpr (INPUT_LAYOUT == FaiKenel::inputLayout::TND) {
-                    qSeqlenCur = QSeqLenOf(0, gActualQseqlen, gSeqUsedQ);
+                // Task-id round-robin (mapping and task order identical to
+                // the origin/main walk) over the AICPU batch table: dense
+                // starts[] boundaries, records {qLen, kvLen} loaded only on
+                // a batch switch (single comparison), and walk-shaped
+                // arithmetic coordinates (one div per task, no branches).
+                // prev stays inside runMainLoop (origin/main form).
+                // Local constant of tilingdata.h's TndTableOffset(): aicore
+                // code cannot call the unmarked host-side inline helper.
+                constexpr uint32_t tndTblOff = (sizeof(FAInferTilingData) + 31U) & ~31U;
+                AscendC::GlobalTensor<uint32_t> gStarts;
+                gStarts.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t *>(
+                    reinterpret_cast<__gm__ uint8_t *>(fATilingData) + tndTblOff));
+                AscendC::GlobalTensor<uint32_t> gRec;
+                gRec.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t *>(
+                    reinterpret_cast<__gm__ uint8_t *>(fATilingData) + tndTblOff) +
+                    (batch + 1U));
+                const uint32_t coreNumU = static_cast<uint32_t>(coreNum);
+                // Startup scan: a core's entry batch is <= its coreIdx, so
+                // this walks few starts[] words once.
+                uint32_t curBatch = 0;
+                uint32_t startCur = 0;
+                uint32_t nextStart = gStarts.GetValue(1);
+                while (coreIdx >= nextStart) {
+                    ++curBatch;
+                    startCur = nextStart;
+                    nextStart = gStarts.GetValue(curBatch + 1U);
                 }
-                for (uint32_t taskIdx = coreIdx; taskIdx < totalTaskNum; taskIdx += uint32_t(coreNum))  {
-                    while (taskIdx >= curTotalTaskNumTmp) {
-                        ++curBatchTmp;
-                        preTotalTaskNumTmp = curTotalTaskNumTmp;
-                        qSeqlenCur = fATilingData->maxQSeqlen;
-                        if constexpr (INPUT_LAYOUT == FaiKenel::inputLayout::TND) {
-                            qSeqlenCur = QSeqLenOf(curBatchTmp, gActualQseqlen, gSeqUsedQ);
-                        }
-
-                        // GetQSBlockTile is a constant independent of kvSeqlen so the kv
-                        // length is resolved in the cachedBatch gate below, not here. If this
-                        // function ever becomes kv dependent move the kv resolution back.
-                        uint32_t curQNBlockTileTmp = GetQNBlockTile(qSeqlenCur, groupSize);
-                        uint32_t qNBlockNumPerGroupTmp = CeilDiv(groupSize, curQNBlockTileTmp);
-                        uint32_t curQNBlockNumTmp = qNBlockNumPerGroupTmp * kvHeads;
-                        uint32_t curQSBlockTileTmp = GetQSBlockTile(kvSeqlenCur);
-                        uint32_t curQSBlockNumTmp = CeilDiv(qSeqlenCur, curQSBlockTileTmp);
-                        curTotalTaskNumTmp += curQNBlockNumTmp * curQSBlockNumTmp;
+                uint32_t qLenCur = 0;
+                uint32_t kvLenCur = 0;
+                uint32_t qNBlockNumCur = 1;
+                {
+                    const uint32_t rb = curBatch * kTndBatchRecWords;
+                    qLenCur = gRec.GetValue(rb + 0);
+                    kvLenCur = gRec.GetValue(rb + 1);
+                    if constexpr (INPUT_LAYOUT != FaiKenel::inputLayout::TND) {
+                        // BSND kv length is not part of the table contract.
+                        kvLenCur = static_cast<uint32_t>(gActualKvseqlen.GetValue(curBatch));
+                        kvLenCur += (kvNewSeqlen != 0U ? kvNewSeqlen : 0U);
                     }
-
-                    if (curBatchTmp != cachedBatch) {
-                        kvSeqlenCur = static_cast<uint32_t>(gActualKvseqlen.GetValue(curBatchTmp));
-                        if constexpr (INPUT_LAYOUT == FaiKenel::inputLayout::TND) {
-                            if constexpr (!PAGED_CACHE_FLAG) {
-                                kvSeqlenCur = KvSeqLenOf(curBatchTmp, gActualKvseqlen, gSeqUsedKv);
-                            }
+                    qNBlockNumCur = CeilDiv(groupSize,
+                        GetQNBlockTile(qLenCur, groupSize)) * kvHeads;
+                }
+                for (uint32_t taskIdx = coreIdx; taskIdx < totalTaskNum;
+                     taskIdx += coreNumU) {
+                    if (taskIdx >= nextStart) {
+                        // Batch switch (the walk's cachedBatch role): hop
+                        // starts[] past thin batches, then reload the record.
+                        do {
+                            ++curBatch;
+                            startCur = nextStart;
+                            nextStart = gStarts.GetValue(curBatch + 1U);
+                        } while (taskIdx >= nextStart);
+                        const uint32_t rb = curBatch * kTndBatchRecWords;
+                        qLenCur = gRec.GetValue(rb + 0);
+                        kvLenCur = gRec.GetValue(rb + 1);
+                        if constexpr (INPUT_LAYOUT != FaiKenel::inputLayout::TND) {
+                            kvLenCur = static_cast<uint32_t>(gActualKvseqlen.GetValue(curBatch));
+                            kvLenCur += (kvNewSeqlen != 0U ? kvNewSeqlen : 0U);
                         }
-                        // Per batch KV length including the appended new KV, reused by every task
-                        kvSeqlenCur += (kvNewSeqlen != 0U ? kvNewSeqlen : 0U);
-                        uint32_t curQNBlockTileCur = GetQNBlockTile(qSeqlenCur, groupSize);
-                        uint32_t qNBlockNumPerGroupCur = CeilDiv(groupSize, curQNBlockTileCur);
-                        curQNBlockNumCur = qNBlockNumPerGroupCur * kvHeads;
-                        curQSBlockNumCur = CeilDiv(qSeqlenCur, 128);
-                        cachedBatch = curBatchTmp;
+                        qNBlockNumCur = CeilDiv(groupSize,
+                            GetQNBlockTile(qLenCur, groupSize)) * kvHeads;
                     }
-
-                    uint32_t taskIdxCurBatch = taskIdx - preTotalTaskNumTmp;
-
-                    uint32_t qSBlockIdxCur = taskIdxCurBatch / curQNBlockNumCur;
-                    uint32_t qNBlockIdxCur = taskIdxCurBatch - qSBlockIdxCur * curQNBlockNumCur;
-
-
+                    const uint32_t i = taskIdx - startCur;
+                    const uint32_t qS = i / qNBlockNumCur;
+                    const uint32_t qN = i - qS * qNBlockNumCur;
                     uint32_t pipelineDrain = 0;
-                    if(taskIdx + uint32_t(coreNum) >= totalTaskNum) {
+                    if (taskIdx + coreNumU >= totalTaskNum) {
                         pipelineDrain = PRE_LAUNCH;
                     }
-
                     const uint32_t currentTaskStateSlot = taskStateSequence % STACK_SLOTS;
                     const bool hasTaskWork = runMainLoop(
-                        coreIdx, curBatchTmp, qSeqlenCur, kvSeqlenCur, qNBlockIdxCur, qSBlockIdxCur,
+                        coreIdx, curBatch, qLenCur, kvLenCur,
+                        qN, qS,
                         false, 0, 0,
                         0, 0,
                         globalTensors,
@@ -625,7 +624,7 @@ namespace SplitFuse {
             uint32_t kvSeqlenOld = appendKVFlag ? (kvSeqlenCur - kvNewSeqlen) : kvSeqlenCur;
             uint32_t prevQSeqlenSum = 0;
             uint32_t prevKvSeqlenSum = 0;
-
+            
             if constexpr (INPUT_LAYOUT == FaiKenel::inputLayout::TND) {
                 prevQSeqlenSum = static_cast<uint32_t>(gActualQseqlen.GetValue(BIdx));
                 if constexpr (!PAGED_CACHE_FLAG) {

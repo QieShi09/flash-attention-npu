@@ -42,6 +42,8 @@ __global__ __aicpu__ uint32_t ComputeFAMetadataV3(void *args)
     FAInferTilingData *tilingData = reinterpret_cast<FAInferTilingData *>(
         metaArgs->metaOutAddr + fa_metadata::TilingOffset(hasMask));
     const int32_t *seqlensQ = reinterpret_cast<const int32_t *>(metaArgs->seqlensQAddr);
+    const int32_t *cuSeqlensQ = reinterpret_cast<const int32_t *>(metaArgs->cuSeqlensQAddr);
+    const int32_t *cuSeqlensK = reinterpret_cast<const int32_t *>(metaArgs->cuSeqlensKAddr);
     const int32_t *cacheSeqlens = reinterpret_cast<const int32_t *>(metaArgs->cacheSeqlensAddr);
 
     std::memset(tilingData, 0, sizeof(FAInferTilingData));
@@ -123,6 +125,21 @@ __global__ __aicpu__ uint32_t ComputeFAMetadataV3(void *args)
     tilingData->workSpaceSize = fa_metadata::WorkSpaceSize(blockDim);
 
     const uint32_t groupSize = (metaArgs->numHeadsK == 0) ? 1u : (metaArgs->numHeads / metaArgs->numHeadsK);
+    // Batch scheduler table for the task-id round-robin kernel: dense
+    // starts[] (first global task id per batch, sentinel = totalTaskNum)
+    // for boundary scans and thin-batch skips, then per-batch records
+    // {qLen, kvLen, prevQ, prevKv}; the kernel reads only qLen/kvLen when
+    // it stops in a batch (prev is computed inside runMainLoop).
+    uint32_t *tndStarts = nullptr;
+    uint32_t *tndRec = nullptr;
+    {
+        constexpr uint32_t tblOff = (sizeof(FAInferTilingData) + 31U) & ~31U;
+        uint8_t *base = reinterpret_cast<uint8_t *>(tilingData) + tblOff;
+        tndStarts = reinterpret_cast<uint32_t *>(base);
+        tndRec = tndStarts + static_cast<uint64_t>(metaArgs->batch) + 1u;
+    }
+    uint32_t tndQTokSum = 0;
+    uint32_t tndKvTokSum = 0;
     uint32_t totalTaskNum = 0;
     uint32_t firstBatchTaskNum = 0;
     uint32_t maxQ = 0;
@@ -132,15 +149,34 @@ __global__ __aicpu__ uint32_t ComputeFAMetadataV3(void *args)
         if (seqlensQ != nullptr) {
             qSeqlen = static_cast<uint32_t>(seqlensQ[batchIdx]);
         }
+        uint32_t kvLen = 0;
+        if (cacheSeqlens != nullptr) {
+            kvLen = static_cast<uint32_t>(cacheSeqlens[batchIdx]);
+        }
         const uint32_t curQNBlockTile = GetQNBlockTile(qSeqlen, groupSize);
         const uint32_t qNBlockNumPerGroup = CeilDiv(groupSize, curQNBlockTile);
         const uint32_t curQNBlockNum = qNBlockNumPerGroup * metaArgs->numHeadsK;
         const uint32_t curQSBlockNum = CeilDiv(qSeqlen, Q_TILE_CEIL);
         const uint32_t curTaskNum = curQNBlockNum * curQSBlockNum;
+        if (tndStarts != nullptr) {
+            tndStarts[batchIdx] = totalTaskNum;
+            uint32_t *bRec = tndRec + static_cast<uint64_t>(batchIdx) * kTndBatchRecWords;
+            const uint32_t kvLenTotal = kvLen + metaArgs->kvNewSeqlen;
+            bRec[0] = qSeqlen;
+            bRec[1] = kvLenTotal;
+            bRec[2] = (cuSeqlensQ != nullptr) ?
+                static_cast<uint32_t>(cuSeqlensQ[batchIdx]) : tndQTokSum;
+            bRec[3] = (metaArgs->kvNewSeqlen != 0u) ?
+                (batchIdx * metaArgs->kvCacheSeqlen) :
+                ((cuSeqlensK != nullptr) ?
+                static_cast<uint32_t>(cuSeqlensK[batchIdx]) : tndKvTokSum);
+        }
         if (batchIdx == 0) {
             firstBatchTaskNum = curTaskNum;
         }
         totalTaskNum += curTaskNum;
+        tndQTokSum += qSeqlen;
+        tndKvTokSum += kvLen;
         if (qSeqlen > maxQ) {
             maxQ = qSeqlen;
         }
@@ -150,6 +186,10 @@ __global__ __aicpu__ uint32_t ComputeFAMetadataV3(void *args)
     }
     tilingData->firstBatchTaskNum = firstBatchTaskNum;
     tilingData->totalTaskNum = totalTaskNum;
+    tilingData->tndTableNum = totalTaskNum;
+    if (tndStarts != nullptr) {
+        tndStarts[metaArgs->batch] = totalTaskNum;  // sentinel ends the scans
+    }
 
         const uint32_t bd = metaArgs->blockDim;
         const uint32_t numTasks = metaArgs->batch * metaArgs->numHeadsK;

@@ -91,7 +91,13 @@ static at::Tensor GetSchedulerMetadataImpl(FAMetadataArgs args,
                                            const at::Tensor &seqlensK,
                                            const std::optional<at::Tensor> &seqlensQ)
 {
-    const int64_t bytes = static_cast<int64_t>(fa_metadata::MetadataBytes(args.maskType != 0));
+    // cu for prevQ/prevKv (0 = use running sums); task bound for sizing.
+    args.cuSeqlensQAddr = 0ULL;
+    args.cuSeqlensKAddr = 0ULL;
+    const uint32_t boundTasks = args.batch *
+        (((args.maxQSeqlen + 127U) / 128U)) * args.numHeads;
+    const int64_t bytes = static_cast<int64_t>(fa_metadata::MetadataBytes(args.maskType != 0,
+        boundTasks, args.blockDim, args.batch));
     at::Tensor meta = at::empty({bytes}, at::device(at::kPrivateUse1).dtype(at::kByte));
     args.metaOutAddr = reinterpret_cast<uint64_t>(meta.data_ptr());
 
@@ -389,7 +395,13 @@ mha_fwd(at::Tensor q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seql
         is_causal = maskDer.is_causal;
         is_local = maskDer.is_local;
         const bool hasMask = maskDer.maskType != static_cast<uint32_t>(FaiKenel::MaskType::NO_MASK);
-        TORCH_CHECK(static_cast<uint64_t>(schedMd.nbytes()) == fa_metadata::MetadataBytes(hasMask),
+        const uint32_t checkBound = static_cast<uint32_t>(batch_size) *
+            (((static_cast<uint32_t>(seqlen_q) + 127U) / 128U)) * static_cast<uint32_t>(num_heads);
+        const uint64_t mdBase = fa_metadata::MetadataBytes(hasMask);
+        const uint64_t mdWithTable = fa_metadata::MetadataBytes(hasMask,
+            checkBound, static_cast<uint32_t>(blockDim), static_cast<uint32_t>(batch_size));
+        TORCH_CHECK(static_cast<uint64_t>(schedMd.nbytes()) == mdBase ||
+                    static_cast<uint64_t>(schedMd.nbytes()) == mdWithTable,
                     "scheduler_metadata buffer size must exactly match this call's "
                     "causal/window-derived layout");
         auto metaBase = static_cast<uint8_t *>(schedMd.data_ptr());

@@ -16,7 +16,21 @@ constexpr uint64_t MASK_BYTES = static_cast<uint64_t>(MASK_DIM) * MASK_DIM;
 // scheduler_metadata is tiling-only. The 2048x2048 compressed triu(1) mask is
 // generated locally on the device by MakeDeviceTriuMask when required.
 inline uint64_t TilingOffset(bool /*has_mask*/) { return 0; }
-inline uint64_t MetadataBytes(bool /*has_mask*/) { return sizeof(FAInferTilingData); }
+// tndTaskDescs > 0 also reserves the batch scheduler table after the tiling
+// blob: a dense starts[] array (batch+1 words, last = totalTaskNum sentinel)
+// followed by batch x 16B records {qLen, kvLen, prevQ, prevKv}.
+inline uint64_t MetadataBytes(bool /*has_mask*/, uint32_t tndTaskDescs = 0,
+    uint32_t blockDim = 0U, uint32_t batchCount = 0U)
+{
+    uint64_t base = sizeof(FAInferTilingData);
+    (void)blockDim;
+    if (tndTaskDescs != 0U) {
+        base = TndTableOffset() +
+            static_cast<uint64_t>(batchCount + 1U) * 4U +
+            static_cast<uint64_t>(batchCount) * kTndBatchRecWords * 4U;
+    }
+    return base;
+}
 
 constexpr uint64_t WORKSPACE_BLOCK_SIZE_DB = static_cast<uint64_t>(128) * 512;
 constexpr uint64_t PRELAUNCH_NUM = 3;
@@ -33,6 +47,8 @@ inline uint64_t WorkSpaceSize(uint64_t blockDim)
 struct FAMetadataArgs {
     uint64_t seqlensQAddr;
     uint64_t cacheSeqlensAddr;
+    uint64_t cuSeqlensQAddr;
+    uint64_t cuSeqlensKAddr;
     uint64_t metaOutAddr;
     uint32_t batch;
     uint32_t numHeads;
