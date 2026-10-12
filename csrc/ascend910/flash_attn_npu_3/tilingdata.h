@@ -42,6 +42,7 @@ struct FAInferTilingData {
     uint32_t kvHeads;
     uint32_t batch;
     uint32_t maxNumBlocksPerBatch;
+    uint32_t firstBatchTaskNum;
     uint32_t totalTaskNum;
     uint32_t maskType;
     uint64_t mm1OutSize;
@@ -65,6 +66,7 @@ struct FAInferTilingData {
 
     uint32_t kvNewSeqlen;
     uint32_t kvCacheSeqlen;
+    uint32_t tndTableNum;
     coreNode coreInfo[25];
     splitNode splitInfo[25];
 
@@ -78,6 +80,7 @@ struct FAInferTilingData {
     uint32_t get_kvHeads() const { return kvHeads; }
     uint32_t get_batch() const { return batch; }
     uint32_t get_maxNumBlocksPerBatch() const { return maxNumBlocksPerBatch; }
+    uint32_t get_firstBatchTaskNum() const { return firstBatchTaskNum; }
     uint32_t get_totalTaskNum() const { return totalTaskNum; }
     uint32_t get_maskType() const { return maskType; }
     uint64_t get_mm1OutSize() const { return mm1OutSize; }
@@ -109,6 +112,7 @@ struct FAInferTilingData {
     void set_kvHeads(uint32_t value) { kvHeads = value; }
     void set_batch(uint32_t value) { batch = value; }
     void set_maxNumBlocksPerBatch(uint32_t value) { maxNumBlocksPerBatch = value; }
+    void set_firstBatchTaskNum(uint32_t value) { firstBatchTaskNum = value; }
     void set_totalTaskNum(uint32_t value) { totalTaskNum = value; }
     void set_maskType(uint32_t value) { maskType = value; }
 
