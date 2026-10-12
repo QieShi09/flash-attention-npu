@@ -140,7 +140,6 @@ __global__ __aicpu__ uint32_t ComputeFAMetadataV3(void *args)
     }
     uint32_t tndQTokSum = 0;
     uint32_t tndKvTokSum = 0;
-    uint32_t firstBatchTaskNum = 0;
     uint32_t totalTaskNum = 0;
     uint32_t maxQ = 0;
     uint32_t minQ = 0xFFFFFFFFu;
@@ -171,9 +170,6 @@ __global__ __aicpu__ uint32_t ComputeFAMetadataV3(void *args)
                 ((cuSeqlensK != nullptr) ?
                 static_cast<uint32_t>(cuSeqlensK[batchIdx]) : tndKvTokSum);
         }
-        if (batchIdx == 0) {
-            firstBatchTaskNum = curTaskNum;
-        }
         totalTaskNum += curTaskNum;
         tndQTokSum += qSeqlen;
         tndKvTokSum += kvLen;
@@ -184,9 +180,7 @@ __global__ __aicpu__ uint32_t ComputeFAMetadataV3(void *args)
             minQ = qSeqlen;
         }
     }
-    tilingData->firstBatchTaskNum = firstBatchTaskNum;
     tilingData->totalTaskNum = totalTaskNum;
-    tilingData->tndTableNum = totalTaskNum;
     if (tndStarts != nullptr) {
         tndStarts[metaArgs->batch] = totalTaskNum;  // sentinel ends the scans
     }

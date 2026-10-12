@@ -512,9 +512,6 @@ mha_fwd(at::Tensor q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seql
             uint64_t curQSBlockTile = fa_split::GetQSBlockTile(kvSeqlen);
             uint64_t curQSBlockNum = (qSeqlen + curQSBlockTile - 1) / curQSBlockTile;
             uint64_t curTaskNum = curQNBlockNum * curQSBlockNum;
-            if (batchIdx == 0) {
-                tiling_cpu_ptr->set_firstBatchTaskNum(curTaskNum);
-            }
             totalTaskNum += curTaskNum;
         }
         tiling_cpu_ptr->set_totalTaskNum(totalTaskNum);

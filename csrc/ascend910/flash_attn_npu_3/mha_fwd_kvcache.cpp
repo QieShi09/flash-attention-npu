@@ -181,7 +181,6 @@ namespace SplitFuse {
             embedV = fATilingData->embeddingSizeV;
             pagedBlockSize = fATilingData->blockSize;
             maxNumBlocksPerBatch = fATilingData->maxNumBlocksPerBatch;
-            firstBatchTaskNum = fATilingData->firstBatchTaskNum;
             totalTaskNum = fATilingData->totalTaskNum;
             blockSize = fATilingData->blockSize;
             maskType = fATilingData->maskType;
@@ -1283,7 +1282,6 @@ namespace SplitFuse {
         uint32_t embedV;
         uint32_t pagedBlockSize;
         uint32_t maxNumBlocksPerBatch;
-        uint32_t firstBatchTaskNum;
         uint32_t totalTaskNum;
         uint32_t blockSize;
         uint32_t maskType;
