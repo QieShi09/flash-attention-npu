@@ -595,6 +595,9 @@ std::vector<at::Tensor> mha_fwd(
             if (needCoreNum != 0) {
                 launchBlockDim = needCoreNum;
             }
+        } else {
+            // Avoid launching more AICore blocks than there are attention tasks.
+            launchBlockDim = std::min(blockDim, std::max(totalTaskNum, 1U));
         }
 
         uint64_t WORKSPACE_BLOCK_SIZE_DB = 128 * 512;

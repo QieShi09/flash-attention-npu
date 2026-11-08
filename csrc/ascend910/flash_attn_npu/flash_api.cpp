@@ -509,8 +509,6 @@ std::vector<at::Tensor> mha_fwd_kvcache(
             }
             totalTaskNum += curTaskNum;
         }
-        tiling_cpu_ptr->set_totalTaskNum(totalTaskNum);
-
         uint32_t numTasks = static_cast<uint32_t>(batch_size * num_heads_k);
         bool isLongSeq = (static_cast<double>(numTasks) <= 0.8 * blockDim) &&
                          (max_kv_seqlen >= static_cast<int32_t>(blockDim) * 512);
@@ -538,7 +536,11 @@ std::vector<at::Tensor> mha_fwd_kvcache(
             if (needCoreNum != 0) {
                 launchBlockDim = needCoreNum;
             }
+        } else {
+            // Avoid launching more AICore blocks than there are attention tasks.
+            launchBlockDim = std::min(blockDim, std::max(totalTaskNum, 1U));
         }
+        tiling_cpu_ptr->set_totalTaskNum(totalTaskNum);
 
         uint64_t WORKSPACE_BLOCK_SIZE_DB = 128 * 512;
         uint64_t PRELANCH_NUM = 3;
