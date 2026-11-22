@@ -1,9 +1,8 @@
 # Trusted PR Review trial (fork)
 
 This fork trial runs the trusted review code on GitHub-hosted `ubuntu-latest` runners.
-It automatically reviews a non-draft PR when opened (or when marked ready), and
-does not auto-run on `synchronize`; after pushing a new head, comment exactly
-`/review` to request another review.
+It automatically reviews a non-draft PR when opened, marked ready, or updated
+with a new commit. There is no comment command for manually rerunning review.
 
 ## Setup
 
@@ -17,9 +16,10 @@ does not auto-run on `synchronize`; after pushing a new head, comment exactly
 The PR review workflow checks out the trusted workflow revision, snapshots the
 PR's current head and base SHA, clones that exact head into a temporary directory,
 and posts only if both SHAs are still current. It posts a GitHub review with the
-validated summary and inline comments. The security verdict is recorded in that
-review against the head and base SHA; a later `/review` on the same snapshot
-reuses the verdict while generating a fresh code review.
+validated summary and inline comments. The security verdict is recorded as the
+`Trusted PR Security Audit` status for the exact head and base SHA. A denied
+audit is shown as a failed status and blocks the manual NPU CI path until a new
+commit is reviewed.
 
 Cursor runs with a temporary CLI configuration that allows workspace reads and
 denies writes, shell, web fetches, and MCP tools. `CURSOR_API_KEY` is present only

@@ -73,6 +73,16 @@ def render_body(result, audit_verdict):
     return "\n".join(lines)
 
 
+def render_inline_comment(item):
+    category = item["category"].upper()
+    severity = item["severity"].upper()
+    label = f"[{category}][{severity}]"
+    # Security findings are intentionally visually prominent in GitHub's inline view.
+    if item["category"] == "security":
+        label = f"**{label}**"
+    return f"{label} {item['body']}"
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--result", required=True)
@@ -117,10 +127,7 @@ def main():
                 "path": item["path"],
                 "line": item["line"],
                 "side": "RIGHT",
-                "body": (
-                    f"[{item['category'].upper()}][{item['severity'].upper()}] "
-                    f"{item['body']}"
-                ),
+                "body": render_inline_comment(item),
             }
             for item in result["review"]["inline_comments"]
         ],

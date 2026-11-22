@@ -17,10 +17,6 @@ def gh_json(*args):
     return json.loads(subprocess.check_output(["gh", "api", *args], text=True))
 
 
-def can_trigger_review(author_association):
-    return author_association == "OWNER"
-
-
 def main():
     repo = os.environ["GITHUB_REPOSITORY"]
     event_name = os.environ["GITHUB_EVENT_NAME"]
@@ -28,18 +24,7 @@ def main():
     output = Path(os.environ["GITHUB_OUTPUT"])
 
     should_run = True
-    if event_name == "issue_comment":
-        pr = event.get("issue", {}).get("pull_request")
-        should_run = (
-            bool(pr)
-            and re.fullmatch(r"/review", event.get("comment", {}).get("body", "").strip())
-            is not None
-        )
-        if should_run:
-            association = event.get("comment", {}).get("author_association")
-            should_run = can_trigger_review(association)
-        pr_number = event.get("issue", {}).get("number") if pr else None
-    elif event_name == "pull_request_target":
+    if event_name == "pull_request_target":
         pr_event = event.get("pull_request", {})
         pr_number = pr_event.get("number")
         should_run = pr_number is not None and not pr_event.get("draft", False)
