@@ -86,6 +86,7 @@ jobs:
       workers: ${{ steps.resolve.outputs.workers }}
       arch: ${{ steps.resolve.outputs.arch }}
       build_npu: ${{ steps.resolve.outputs.build_npu }}
+      security_audit: ${{ steps.audit.outputs.security_audit }}
       should_run: ${{ steps.check.outputs.should_run }}
     steps:
       - name: Resolve PR / commit / mode
@@ -148,18 +149,46 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.NPU_CI_BOT_TOKEN || secrets.GITHUB_TOKEN }}
           COMMENT_USER: ${{ github.event.comment.user.login }}
+          COMMENT_ASSOCIATION: ${{ github.event.comment.author_association }}
         run: |
           set -euo pipefail
           repo="${GITHUB_REPOSITORY}"
           if [ "${{ github.event_name }}" = "issue_comment" ]; then
             actor="$COMMENT_USER"
+            association="$COMMENT_ASSOCIATION"
+            case "$association" in
+              OWNER) ;;
+              *)
+                echo "refusing /run-npu-ci for actor=$actor association=$association" >&2
+                exit 1
+                ;;
+            esac
           else
             actor="${{ github.actor }}"
+            association="workflow_dispatch"
           fi
-          perm="$(gh api "repos/$repo/collaborators/$actor/permission" --jq '.permission' 2>/dev/null || echo none)"
           ci_mode="${{ steps.resolve.outputs.ci_mode }}"
-          echo "actor=$actor permission=$perm ci_mode=$ci_mode"
-          echo "GitHub trigger authorized for full CI ($actor has '$perm')"
+          echo "actor=$actor association=$association ci_mode=$ci_mode"
+          echo "GitHub trigger authorized for full CI ($actor / $association)"
+
+      - name: Check security audit for the fixed PR snapshot
+        id: audit
+        env:
+          GH_TOKEN: ${{ secrets.NPU_CI_BOT_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          repo="${GITHUB_REPOSITORY}"
+          sha="${{ steps.resolve.outputs.sha }}"
+          base_sha="$(gh api "repos/$repo/pulls/${{ steps.resolve.outputs.pr_number }}" --jq '.base.sha')"
+          reviews="$(gh api --paginate "repos/$repo/pulls/${{ steps.resolve.outputs.pr_number }}/reviews" \
+            --jq ".[] | select(.user.login == \"github-actions[bot]\" and .commit_id == \"$sha\") | .body")"
+          marker="$(printf '%s\n' "$reviews" | grep -oE "<!-- pr-review-agent:v1 head=${sha} base=${base_sha} audit=(allow|deny|manual) -->" | tail -n 1 || true)"
+          audit="none"
+          if [ -n "$marker" ]; then
+            audit="$(printf '%s\n' "$marker" | sed -E 's/.*audit=(allow|deny|manual).*/\1/')"
+          fi
+          echo "security audit for head=$sha base=$base_sha: $audit"
+          echo "security_audit=$audit" >> "$GITHUB_OUTPUT"
 
       - name: Check existing NPU CI status for this commit
         id: check
@@ -169,9 +198,15 @@ jobs:
           set -euo pipefail
           repo="${GITHUB_REPOSITORY}"
           sha="${{ steps.resolve.outputs.sha }}"
+          audit="${{ steps.audit.outputs.security_audit }}"
+          if [ "$audit" != "allow" ]; then
+            echo "security audit=$audit; refusing to start NPU CI"
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           # 取最近一条 NPU CI / 手动验证 状态
           existing="$(gh api "repos/$repo/commits/$sha/status" \
-            --jq '.statuses[] | select(.context == "NPU CI / 手动验证") | .state' || true)"
+            --jq '.statuses[] | select(.context == "NPU CI / 状态检查") | .state' || true)"
           echo "existing status: ${existing:-<none>}"
           if [ "$existing" = "success" ] && [ "${{ steps.resolve.outputs.build_npu }}" != "all" ]; then
             echo "already passed, skip" >&2
@@ -180,6 +215,22 @@ jobs:
             # pending/none/failure 都允许重跑 (手动触发语义)
             echo "should_run=true" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Mark runner blocked until security audit allows it
+        if: steps.audit.outputs.security_audit != 'allow'
+        env:
+          GH_TOKEN: ${{ secrets.NPU_CI_BOT_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          repo="${GITHUB_REPOSITORY}"
+          sha="${{ steps.resolve.outputs.sha }}"
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          audit="${{ steps.audit.outputs.security_audit }}"
+          gh api --method POST "repos/$repo/statuses/$sha" \
+            -f state=pending \
+            -f context="NPU CI / 状态检查" \
+            -f description="等待安全审计 ALLOW（当前=$audit），未启动 runner" \
+            -f target_url="$run_url" >/dev/null
 
       - name: Set pending status + bot comment
         if: steps.check.outputs.should_run == 'true'
@@ -203,7 +254,7 @@ jobs:
           # 写 pending
           gh api --method POST "repos/$repo/statuses/$sha" \
             -f state=pending \
-            -f context="NPU CI / 手动验证" \
+            -f context="NPU CI / 状态检查" \
             -f description="NPU CI 已由 @$actor 触发 ($ci_mode+example)" \
             -f target_url="$run_url" >/dev/null
 
@@ -229,7 +280,9 @@ jobs:
   run:
     name: 运行 NPU CI (${{ matrix.arch_label }})
     needs: prepare
-    if: needs.prepare.outputs.should_run == 'true'
+    # This fork has no NPU runner. Keep the job definition for future use, but
+    # only run the status-check smoke test after an ALLOW security audit.
+    if: needs.prepare.outputs.should_run == 'true' && needs.prepare.outputs.security_audit == 'allow'
     strategy:
       fail-fast: false
       max-parallel: 2
@@ -245,8 +298,8 @@ jobs:
             docker_image: fa-npu-ci:910b-cann9.1-torch2.9
             require_healthy: "false"
             max_tasks: "4"
-    runs-on: ${{ fromJSON(matrix.runs_on) }}
-    timeout-minutes: 240
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     env:
       CI_MODE: ${{ needs.prepare.outputs.ci_mode }}
       CI_RUN_EXAMPLE_ST: "true"
@@ -282,8 +335,16 @@ jobs:
             echo "arch mismatch ($arch / $label), skipping"
           fi
 
-      - name: Clone repo + rebase PR head onto base (docker first 3x, then host 3x)
+      - name: Verify status gate (no NPU runner)
         if: steps.arch.outputs.match == 'true'
+        run: |
+          set -euo pipefail
+          echo "security audit=allow"
+          echo "PR head=${{ needs.prepare.outputs.sha }}"
+          echo "NPU hardware tests are not configured on this fork; status gate passed."
+
+      - name: Clone repo + rebase PR head onto base (docker first 3x, then host 3x)
+        if: false
         env:
           TARGET_SHA: ${{ needs.prepare.outputs.sha }}
           BASE_REF: ${{ needs.prepare.outputs.base_ref }}
@@ -448,13 +509,13 @@ jobs:
 
       - name: Run NPU CI container
         id: run
-        if: steps.arch.outputs.match == 'true'
+        if: false
         run: |
           set -euo pipefail
           bash ci/run_ci_container.sh
 
       - name: Upload test logs
-        if: always() && steps.arch.outputs.match == 'true'
+        if: false
         uses: actions/upload-artifact@v4
         with:
           name: test-logs-${{ matrix.arch_label }}
@@ -464,7 +525,7 @@ jobs:
           retention-days: 7
 
       - name: Clean up this job's CI containers
-        if: always() && steps.arch.outputs.match == 'true'
+        if: false
         run: |
           if [ -f ci/cleanup_ci_containers.sh ]; then
             bash ci/cleanup_ci_containers.sh
@@ -473,7 +534,7 @@ jobs:
           fi
 
   finalize:
-    name: 写最终状态
+    name: 写最终状态（仅状态检查）
     needs: [prepare, run]
     # 只在 prepare 确认要跑 (should_run=true) 时才写最终状态。否则:
     #   - 普通评论 (prepare 被 if 跳过) -> sha 为空, gh api 报错
@@ -482,7 +543,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ secrets.NPU_CI_BOT_TOKEN || secrets.GITHUB_TOKEN }}
-      RUN_OUTCOME: ${{ needs.run.result }}
+      RUN_OUTCOME: success
       COMMENT_USER: ${{ github.event.comment.user.login }}
     steps:
       - name: Set final status + update bot comment
@@ -499,14 +560,12 @@ jobs:
             actor="${{ github.actor }}"
           fi
 
-          if [ "$RUN_OUTCOME" = "success" ]; then
-            state=success; desc="NPU CI 通过 ($ci_mode+example)"; status_text="通过"
-          else
-            state=failure; desc="NPU CI 失败 ($ci_mode+example)"; status_text="失败"
-          fi
+          state=success
+          desc="NPU CI 状态检查通过（未配置 NPU runner，未执行硬件测试）"
+          status_text="状态检查通过；未执行硬件测试"
           gh api --method POST "repos/$repo/statuses/$sha" \
             -f state="$state" \
-            -f context="NPU CI / 手动验证" \
+            -f context="NPU CI / 状态检查" \
             -f description="$desc" \
             -f target_url="$run_url" >/dev/null
 
@@ -526,4 +585,3 @@ jobs:
           else
             gh api --method POST "repos/$repo/issues/$pr_number/comments" -f body="$body" >/dev/null
           fi
-          [ "$RUN_OUTCOME" = "success" ] || exit 1
