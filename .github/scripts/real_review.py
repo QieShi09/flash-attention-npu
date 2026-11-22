@@ -143,6 +143,7 @@ def validate_result(result, snapshot, audit_required, diff):
             or item["line"] < 1
             or item.get("side") != "RIGHT"
             or item.get("severity") not in {"high", "medium", "low"}
+            or item.get("category") not in {"security", "review"}
             or not isinstance(item.get("body"), str)
         ):
             raise ValueError("invalid inline comment")
