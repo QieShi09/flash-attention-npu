@@ -297,7 +297,6 @@ def main():
                 "allow": ["Read(**)"],
                 "deny": ["Write(**)", "Shell(*)", "WebFetch(*)", "Mcp(*:*)"],
             },
-            "sandbox": {"readBoundary": "workspace"},
         }
         (project_cursor_config / "cli.json").write_text(json.dumps(cursor_permissions, indent=2))
         instruction = (
@@ -313,7 +312,7 @@ def main():
         cursor_home = Path(temporary) / "cursor-home"
         (cursor_home / ".cursor").mkdir(parents=True)
         (cursor_home / ".cursor" / "cli-config.json").write_text(
-            json.dumps(cursor_permissions, indent=2)
+            json.dumps({"version": 1, **cursor_permissions}, indent=2)
         )
         cursor_env["HOME"] = str(cursor_home)
         args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -357,6 +356,11 @@ def main():
                 try:
                     event = json.loads(line)
                 except json.JSONDecodeError:
+                    cleaned = clean_terminal_text(line).strip()
+                    if cleaned:
+                        progress(f"Agent           {cleaned[:120]}", started)
+                    continue
+                if not isinstance(event, dict):
                     cleaned = clean_terminal_text(line).strip()
                     if cleaned:
                         progress(f"Agent           {cleaned[:120]}", started)
