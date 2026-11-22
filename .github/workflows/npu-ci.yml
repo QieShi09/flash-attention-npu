@@ -8,6 +8,8 @@ name: NPU CI
 #      不带 arch= 则默认 both (950 和 910B 都跑)
 #      不带 build_npu= 则按本机 NPU 只编译对应后端
 # GitHub 上所有触发均强制执行 full；原 quick 用户也可触发。
+#   3. PR 评论 /allow (仅 write/maintain/admin 权限) 覆盖当前 head 的安全阻断，
+#      然后再评论 /run-npu-ci。
 #
 # 状态检查名: NPU CI / 手动验证
 # runner 标签: self-hosted, linux, arm64, npu, flash-attention-npu
@@ -69,6 +71,45 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  allow:
+    name: 允许安全审计
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'issue_comment' &&
+      github.event.issue.pull_request != null &&
+      startsWith(github.event.comment.body, '/allow')
+    steps:
+      - name: Validate permission and update audit status
+        env:
+          GH_TOKEN: ${{ secrets.NPU_CI_BOT_TOKEN || secrets.GITHUB_TOKEN }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          COMMENT_USER: ${{ github.event.comment.user.login }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$COMMENT_BODY" =~ ^/allow[[:space:]]*$ ]]; then
+            echo "Only the exact /allow command is supported" >&2
+            exit 1
+          fi
+          repo="$GITHUB_REPOSITORY"
+          pr_number="${{ github.event.issue.number }}"
+          permission="$(gh api "repos/$repo/collaborators/$COMMENT_USER/permission" --jq '.permission')"
+          case "$permission" in
+            admin|maintain|write) ;;
+            *)
+              echo "refusing /allow for actor=$COMMENT_USER permission=$permission" >&2
+              exit 1
+              ;;
+          esac
+          sha="$(gh api "repos/$repo/pulls/$pr_number" --jq '.head.sha')"
+          base_sha="$(gh api "repos/$repo/pulls/$pr_number" --jq '.base.sha')"
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          gh api --method POST "repos/$repo/statuses/$sha" \
+            -f state=success \
+            -f context="Trusted PR Security Audit" \
+            -f description="Security audit manually allowed by @$COMMENT_USER" \
+            -f target_url="$run_url" >/dev/null
+          echo "Security audit allowed for head=$sha base=$base_sha by @$COMMENT_USER"
+
   prepare:
     name: 手动验证
     runs-on: ubuntu-latest
@@ -184,7 +225,11 @@ jobs:
             --jq ".[] | select(.user.login == \"github-actions[bot]\" and .commit_id == \"$sha\") | .body")"
           marker="$(printf '%s\n' "$reviews" | grep -oE "<!-- pr-review-agent:v1 head=${sha} base=${base_sha} audit=(allow|deny|manual) -->" | tail -n 1 || true)"
           audit="none"
-          if [ -n "$marker" ]; then
+          status_allow="$(gh api "repos/$repo/commits/$sha/status" \
+            --jq '[.statuses[] | select(.context == "Trusted PR Security Audit" and .state == "success")] | length')"
+          if [ "$status_allow" -gt 0 ]; then
+            audit="allow"
+          elif [ -n "$marker" ]; then
             audit="$(printf '%s\n' "$marker" | sed -E 's/.*audit=(allow|deny|manual).*/\1/')"
           fi
           echo "security audit for head=$sha base=$base_sha: $audit"
