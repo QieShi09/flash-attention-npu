@@ -108,7 +108,7 @@ at::Tensor get_scheduler_metadata(int64_t batch_size, int64_t max_seqlen_q, int6
     args.numHeadsK = num_heads_kv;
     args.embeddingSize = headdim;
     args.embeddingSizeV = headdim_v;
-    args.maxQSeqlen = max_seqlen_q;
+    args.maxQSeqlen = max_seqlen_q + 1;
     args.blockDim = block_dim;
     args.isVarlen = is_varlen_q;
     args.numSplits = num_splits;
