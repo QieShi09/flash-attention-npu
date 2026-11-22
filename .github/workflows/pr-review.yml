@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: read
+  checks: write
   pull-requests: write
 
 concurrency:
@@ -32,6 +33,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 .github/scripts/prepare_review.py
+
+      - name: Start or update review Check Run
+        id: check
+        if: steps.prepare.outputs.should_run == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          check_run_id="$(python3 .github/scripts/review_check.py start \
+            --head-sha "${{ steps.prepare.outputs.head_sha }}" \
+            --summary "Trusted review is analyzing the fixed PR snapshot.")"
+          echo "check_run_id=$check_run_id" >> "$GITHUB_OUTPUT"
 
       - name: Install Cursor CLI
         if: steps.prepare.outputs.should_run == 'true'
@@ -59,6 +72,7 @@ jobs:
             --output-dir "$RUNNER_TEMP/pr-review-result"
 
       - name: Publish review for the fixed SHA
+        id: publish
         if: steps.prepare.outputs.should_run == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -70,6 +84,22 @@ jobs:
             --expected-head-sha "${{ steps.prepare.outputs.head_sha }}" \
             --expected-base-sha "${{ steps.prepare.outputs.base_sha }}" \
             --previous-audit "${{ steps.prepare.outputs.previous_audit }}"
+
+      - name: Complete review Check Run
+        if: always() && steps.prepare.outputs.should_run == 'true' && steps.check.outputs.check_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          conclusion=success
+          if [ "${{ steps.review.outcome }}" != "success" ] ||
+             [ "${{ steps.publish.outcome }}" != "success" ]; then
+            conclusion=failure
+          fi
+          python3 .github/scripts/review_check.py complete \
+            --check-run-id "${{ steps.check.outputs.check_run_id }}" \
+            --conclusion "$conclusion" \
+            --summary "Trusted PR review completed; see the published PR review for findings."
 
       - name: Save review diagnostics
         if: always()
