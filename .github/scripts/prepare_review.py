@@ -6,7 +6,6 @@ import os
 from pathlib import Path
 import re
 import subprocess
-from urllib.parse import quote
 
 
 AUDIT_MARKER = re.compile(
@@ -18,26 +17,8 @@ def gh_json(*args):
     return json.loads(subprocess.check_output(["gh", "api", *args], text=True))
 
 
-def can_trigger_review(repo, username):
-    if not isinstance(username, str) or not re.fullmatch(r"[A-Za-z0-9-]+", username):
-        return False
-    response = subprocess.run(
-        [
-            "gh",
-            "api",
-            f"repos/{repo}/collaborators/{quote(username, safe='')}/permission",
-        ],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    if response.returncode != 0:
-        return False
-    try:
-        permission = json.loads(response.stdout).get("permission")
-    except (json.JSONDecodeError, AttributeError):
-        return False
-    return permission in {"admin", "maintain", "write"}
+def can_trigger_review(author_association):
+    return author_association == "OWNER"
 
 
 def main():
@@ -55,8 +36,8 @@ def main():
             is not None
         )
         if should_run:
-            username = event.get("comment", {}).get("user", {}).get("login")
-            should_run = can_trigger_review(repo, username)
+            association = event.get("comment", {}).get("author_association")
+            should_run = can_trigger_review(association)
         pr_number = event.get("issue", {}).get("number") if pr else None
     elif event_name == "pull_request_target":
         pr_event = event.get("pull_request", {})

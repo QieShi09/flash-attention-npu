@@ -2,7 +2,7 @@ name: Trusted PR Review
 
 on:
   pull_request_target:
-    types: [opened, ready_for_review]
+    types: [opened, ready_for_review, synchronize]
   issue_comment:
     types: [created]
 
