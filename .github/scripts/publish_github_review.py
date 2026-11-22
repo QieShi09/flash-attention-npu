@@ -12,6 +12,33 @@ def gh_json(*args):
     return json.loads(subprocess.check_output(["gh", "api", *args], text=True))
 
 
+def publish_security_status(repository, sha, verdict):
+    status_by_verdict = {
+        "allow": ("success", "Security audit allows the fixed snapshot."),
+        "deny": ("failure", "Security audit denied the fixed snapshot."),
+        "manual": ("error", "Security audit requires manual review."),
+    }
+    state, description = status_by_verdict[verdict]
+    subprocess.run(
+        [
+            "gh",
+            "api",
+            "--method",
+            "POST",
+            f"repos/{repository}/statuses/{sha}",
+            "-f",
+            f"state={state}",
+            "-f",
+            "context=Trusted PR Security Audit",
+            "-f",
+            f"description={description}",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
 def render_body(result, audit_verdict):
     review = result["review"]
     audit = result["security_audit"]
@@ -86,7 +113,15 @@ def main():
         "event": "COMMENT",
         "body": render_body(result, audit_verdict),
         "comments": [
-            {"path": item["path"], "line": item["line"], "side": "RIGHT", "body": item["body"]}
+            {
+                "path": item["path"],
+                "line": item["line"],
+                "side": "RIGHT",
+                "body": (
+                    f"[{item['category'].upper()}][{item['severity'].upper()}] "
+                    f"{item['body']}"
+                ),
+            }
             for item in result["review"]["inline_comments"]
         ],
     }
@@ -106,6 +141,7 @@ def main():
         capture_output=True,
     )
     review = json.loads(response.stdout)
+    publish_security_status(repository, args.expected_head_sha, audit_verdict)
     print(f"Published review {review.get('id')} for PR #{args.pr} at {args.expected_head_sha}")
 
 
