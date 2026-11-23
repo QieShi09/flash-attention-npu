@@ -118,7 +118,7 @@ at::Tensor get_scheduler_metadata(int64_t batch_size, int64_t max_seqlen_q, int6
                                         normalized_causal, local);
     args.maskType = normalized_causal ? 1 : (local ? 2 : 0);
     args.windowSizeLeft = window_left;
-    args.windowSizeRight = window_left;
+    args.windowSizeRight = window_right;
     return GetSchedulerMetadataImpl(args, cache_seqlens, cu_seqlens_q, seqused_q);
 }
 
